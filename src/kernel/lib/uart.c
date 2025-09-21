@@ -1,8 +1,9 @@
-// low-level driver routines for 16550a UART.
+/* low-level driver routines for 16550a UART. */
 
 #include "mod.h"
 
-extern volatile int panicked; // from printf.c
+// from printf.c 终止输出的标志
+extern volatile int panicked;
 
 // uart 初始化
 void uart_init(void)

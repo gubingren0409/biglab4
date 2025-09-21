@@ -3,27 +3,29 @@
 ## 1. 代码组织结构
 ```
 ECNU-OSLAB-2025-TASK  
-├── LICENSE    开源协议  
-├── Makefile   编译运行整个项目  
-├── common.mk  Makefile中一些工具链的定义  
-├── kernel.ld  定义了内核程序在链接时的布局  
-├── pictures   README使用的图片目录  
-├── README     实验指导书  
-└── src        源代码
-    └── kernel  
-        ├── arch RISC-V相关
+├── LICENSE        开源协议  
+├── .vscode        配置了可视化调试环境
+├── registers.xml  配置了可视化调试环境  
+├── Makefile       编译运行整个项目  
+├── common.mk      Makefile中一些工具链的定义  
+├── kernel.ld      定义了内核程序在链接时的布局  
+├── pictures       README使用的图片目录  
+├── README.md      实验指导书  
+└── src            源码
+    └── kernel     内核源码
+        ├── arch   RISC-V相关
         │   ├── method.h  
         │   ├── mod.h  
         │   └── type.h  
-        ├── boot 机器启动
+        ├── boot   机器启动
         │   ├── entry.S  
         │   └── start.c (TODO)  
-        ├── lock 锁机制
+        ├── lock   锁机制
         │   ├── spinlock.c (TODO)  
         │   ├── method.h  
         │   ├── mod.h  
         │   └── type.h  
-        ├── lib 常用库
+        ├── lib    常用库
         │   ├── cpu.c  
         │   ├── print.c (TODO)  
         │   ├── uart.c  
@@ -174,13 +176,13 @@ cpu 1 report: sum = 2000000
 
 ## 5. 关于代码仓库的维护
 
-1. 每次实验需要在上次实验的基础上继续往下做，假设你已经完成lab-0
+1. 每次实验需要在上次实验的基础上继续往下做，假设你已经完成lab-0(master)
 
-    那么你此时应该在lab-0分支下使用`git checkout -b lab-1`命令创建并切换到新的分支lab-1  
+    那么你此时应该在lab-0(master)分支下使用`git checkout -b lab-1`命令创建并切换到新的分支lab-1  
 
-    此时新建的lab-1会继承lab-0的内容，但你对lab-1的修改不会影响到lab-0  
+    此时新建的lab-1会继承lab-0(master)的内容，但你对lab-1的修改不会影响到lab-0  
 
-    以此类推，当你从lab-0开始走到lab-n时，你会获得越来越完整和强大的内核  
+    以此类推，当你从lab-1开始走到lab-9时，你会获得越来越完整和强大的内核  
 
 2. 你的代码仓库应该由 **代码 + Markdown文档** 两部分构成  
 
