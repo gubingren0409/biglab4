@@ -67,7 +67,7 @@ void vm_print(pgtbl_t pgtbl)
                 continue;
             assert(PTE_CHECK(pte), "vm_print: pte check fail (2)");
             pgtbl_0 = (pgtbl_t)PTE_TO_PA(pte);
-            printf(".. .. level-0 pgtbl %d: pa = %p\n", j, pgtbl_2);
+            printf(".. .. level-0 pgtbl %d: pa = %p\n", j, pgtbl_0);
 
             for (int k = 0; k < PGSIZE / sizeof(pte_t); k++)
             {
