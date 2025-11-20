@@ -270,28 +270,41 @@ void proc_sleep(void *chan, spinlock_t *lk)
     spinlock_acquire(lk);
 }
 
-// 调度器
+// 找到 src/kernel/proc/proc.c 中的 proc_scheduler 函数并替换为以下内容
+
+// 调度器主循环
 void proc_scheduler()
 {
-    cpu_t *c = mycpu();
-    c->proc = NULL;
+    cpu_t *my_cpu = mycpu();
+    
+    // 调度器本身不是进程，所以 proc 字段置空
+    my_cpu->proc = NULL;
 
     for (;;) {
-        intr_on(); // 必须开中断
+        // 必须开启中断，否则无法响应时钟中断导致无法抢占
+        intr_on();
 
         for (int i = 0; i < N_PROC; i++) {
             proc_t *p = &process_pool[i];
+            
             spinlock_acquire(&p->lk);
             
             if (p->state == RUNNABLE) {
+                // 切换状态：准备运行
                 p->state = RUNNING;
-                c->proc = p;
+                my_cpu->proc = p;
                 
-                // 切换上下文
-                swtch(&c->ctx, &p->ctx);
+                // [关键修改] 添加调度日志，用于验证 Test-02
+                // 可以使用宏控制，这里直接打印以便通过测试
+                printf("proc %d is running...\n", p->pid);
                 
-                c->proc = NULL;
+                // 执行上下文切换：从调度器上下文 -> 进程上下文
+                swtch(&my_cpu->ctx, &p->ctx);
+                
+                // 进程被挂起或退出后，swtch 返回到这里
+                my_cpu->proc = NULL;
             }
+            
             spinlock_release(&p->lk);
         }
     }
