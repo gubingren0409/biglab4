@@ -32,26 +32,55 @@ void pop_off(void)
 }
 
 
-// 自选锁初始化
+// 自旋锁初始化
 void spinlock_init(spinlock_t *lk, char *name)
 {
-
+    lk->locked = 0;
+    lk->name = name;
+    lk->cpuid = -1;
 }
 
 // 是否持有自旋锁
+// 修复点：这里必须返回一个布尔值
 bool spinlock_holding(spinlock_t *lk)
 {
-
+    // 只有当锁被锁住(locked=1)且持有者ID等于当前CPU ID时，才算持有
+    return (lk->locked && lk->cpuid == mycpuid());
 }
 
-// 获取自选锁
+// 获取自旋锁
 void spinlock_acquire(spinlock_t *lk)
 {
+    push_off(); // 关中断，防止在持有锁时发生中断导致死锁
 
+    if (spinlock_holding(lk))
+        panic("spinlock_acquire: recursive lock"); // 禁止重入
+
+    // 原子操作：尝试将 locked 设置为 1
+    // 如果原来就是 1，则循环等待 (spin)
+    while (__sync_lock_test_and_set(&lk->locked, 1) != 0)
+        ;
+
+    // 内存屏障，保证临界区代码不被乱序到锁获取之前
+    __sync_synchronize();
+
+    // 记录当前持有锁的 CPU
+    lk->cpuid = mycpuid();
 }
 
 // 释放自旋锁
 void spinlock_release(spinlock_t *lk)
 {
+    if (!spinlock_holding(lk))
+        panic("spinlock_release: not holding");
 
+    lk->cpuid = -1; // 清除持有者信息
+
+    // 内存屏障，保证临界区代码不被乱序到锁释放之后
+    __sync_synchronize();
+
+    // 原子释放锁
+    __sync_lock_release(&lk->locked);
+
+    pop_off(); // 恢复中断状态
 }

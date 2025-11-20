@@ -1,4 +1,4 @@
-// test-1: sys_getpid and sys_print
+//test-1: sys_getpid and sys_print
 #include "sys.h"
 
 int main()
@@ -14,7 +14,7 @@ int main()
 
 
 // test-2: fork
-// #include "sys.h"
+//#include "sys.h"
 
 // int main()
 // {
