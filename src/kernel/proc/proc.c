@@ -3,101 +3,114 @@
 #include "../mem/mod.h"
 #include "../lib/mod.h"
 
+// 引入用户初始化代码
 #include "../../user/initcode.h"
 
+// 外部汇编与函数声明
 extern char trampoline[];
 extern void swtch(context_t *old, context_t *new);
 extern void trap_user_return();
 
-// --- 全局数据 ---
+// --- 全局控制 ---
 
-// 进程池
-static proc_t process_pool[N_PROC];
-// 初始进程指针
-static proc_t *init_proc;
+// 调度器调试开关：置 1 开启调度日志，置 0 关闭（解决刷屏问题）
+#define SCHED_TRACE 0
 
-// PID 生成锁
-static spinlock_t pid_gen_lock;
+// --- 静态资源管理 ---
+
+// 进程池：所有进程控制块的仓库
+static proc_t proc_pool[N_PROC];
+// 指向首个用户进程（通常是 init）
+static proc_t *init_process;
+
+// PID 分配锁与计数器
+static spinlock_t pid_lock;
 static int next_pid = 1;
 
-// 进程树同步锁（用于 wait/exit/reparent）
-static spinlock_t tree_lock;
+// 进程生命周期锁：用于保护 wait/exit 操作中的进程树关系
+static spinlock_t lifecycle_lock;
 
-// --- 内部辅助函数 ---
+// --- 内部函数 ---
 
-static int new_pid()
+// 分配一个新的 PID
+static int allocate_pid()
 {
     int pid;
-    spinlock_acquire(&pid_gen_lock);
+    spinlock_acquire(&pid_lock);
     pid = next_pid++;
-    spinlock_release(&pid_gen_lock);
+    spinlock_release(&pid_lock);
     return pid;
 }
 
-// 新进程的内核入口
-static void fork_ret()
+// 进程初次运行的入口函数 (内核态 -> 用户态)
+static void proc_entry_point()
 {
+    // 释放调度器切换过来时持有的进程锁
     spinlock_release(&myproc()->lk);
+    // 返回用户空间
     trap_user_return();
 }
 
-// 初始化进程管理
+// 进程模块初始化
 void proc_init()
 {
-    spinlock_init(&pid_gen_lock, "pid_gen");
-    spinlock_init(&tree_lock, "proc_tree");
+    spinlock_init(&pid_lock, "pid_allocator");
+    spinlock_init(&lifecycle_lock, "proc_lifecycle");
     
+    // 初始化进程池
     for (int i = 0; i < N_PROC; i++) {
-        spinlock_init(&process_pool[i].lk, "proc_entry");
-        process_pool[i].state = UNUSED;
-        // 预计算内核栈地址
-        process_pool[i].kstack = KSTACK(i);
+        spinlock_init(&proc_pool[i].lk, "proc_lock");
+        proc_pool[i].state = UNUSED;
+        // 预先计算好每个进程的内核栈基址
+        proc_pool[i].kstack = KSTACK(i);
     }
 }
 
-// 初始化进程页表 (映射 trampoline 和 trapframe)
+// 初始化进程页表：映射 trampoline 和 trapframe
 pgtbl_t proc_pgtbl_init(uint64 tf_va)
 {
     pgtbl_t tbl = (pgtbl_t)pmem_alloc(true);
     if (!tbl) return NULL;
     memset(tbl, 0, PGSIZE);
 
-    // 映射 trampoline (RX)
+    // 映射跳板页 (trampoline) - 执行权限
     vm_mappages(tbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
-    // 映射 trapframe (RW)
+    // 映射 trapframe - 读写权限
     vm_mappages(tbl, TRAPFRAME, tf_va, PGSIZE, PTE_R | PTE_W);
 
     return tbl;
 }
 
-// 分配进程块
+// 申请一个空闲进程块
+// 返回时持有进程锁，失败返回 NULL
 proc_t *proc_alloc()
 {
     proc_t *p = NULL;
 
-    // 寻找 UNUSED 槽位
+    // 遍历寻找 UNUSED 状态的进程槽位
     for (int i = 0; i < N_PROC; i++) {
-        spinlock_acquire(&process_pool[i].lk);
-        if (process_pool[i].state == UNUSED) {
-            p = &process_pool[i];
+        spinlock_acquire(&proc_pool[i].lk);
+        if (proc_pool[i].state == UNUSED) {
+            p = &proc_pool[i];
             break;
         }
-        spinlock_release(&process_pool[i].lk);
+        spinlock_release(&proc_pool[i].lk);
     }
 
     if (!p) return NULL;
 
-    p->pid = new_pid();
-    p->state = UNUSED;
+    // 初始化元数据
+    p->pid = allocate_pid();
+    p->state = UNUSED; // 暂时保持 UNUSED，直到完全初始化
 
-    // 分配 trapframe
+    // 分配 trapframe 物理页
     if ((p->tf = (trapframe_t *)pmem_alloc(true)) == NULL) {
         spinlock_release(&p->lk);
         return NULL;
     }
     memset(p->tf, 0, PGSIZE);
 
-    // 初始化页表
+    // 初始化用户页表
     if ((p->pgtbl = proc_pgtbl_init((uint64)p->tf)) == NULL) {
         pmem_free((uint64)p->tf, true);
         p->tf = NULL;
@@ -105,12 +118,12 @@ proc_t *proc_alloc()
         return NULL;
     }
 
-    // 设置上下文，准备调度
+    // 设置内核上下文，为第一次 swtch 做准备
     memset(&p->ctx, 0, sizeof(p->ctx));
-    p->ctx.ra = (uint64)fork_ret;
-    p->ctx.sp = p->kstack + PGSIZE;
+    p->ctx.ra = (uint64)proc_entry_point; // swtch 返回后跳转这里
+    p->ctx.sp = p->kstack + PGSIZE;       // 设置内核栈顶
 
-    // 清理字段
+    // 清理其他字段
     p->parent = NULL;
     p->exit_code = 0;
     p->sleep_space = NULL;
@@ -119,25 +132,28 @@ proc_t *proc_alloc()
     p->mmap = NULL;
     memset(p->name, 0, sizeof(p->name));
 
-    p->state = RUNNABLE;
     return p;
 }
 
-// 释放进程资源
+// 释放进程资源 (调用者需持有 p->lk)
 void proc_free(proc_t *p)
 {
     if (p->tf) pmem_free((uint64)p->tf, true);
     p->tf = NULL;
 
     if (p->pgtbl) {
-        vm_unmappages(p->pgtbl, USER_BASE, PGSIZE, true); // 代码
-        // 释放堆
+        // 1. 解除用户空间映射 (代码、数据)
+        vm_unmappages(p->pgtbl, USER_BASE, PGSIZE, true);
+        
+        // 2. 解除堆映射
         if (p->heap_top > USER_BASE + PGSIZE)
              vm_unmappages(p->pgtbl, USER_BASE + PGSIZE, p->heap_top - (USER_BASE + PGSIZE), true);
-        // 释放栈
+        
+        // 3. 解除栈映射
         if (p->ustack_npage > 0)
             vm_unmappages(p->pgtbl, TRAPFRAME - p->ustack_npage * PGSIZE, p->ustack_npage * PGSIZE, true);
-        // 释放 mmap
+        
+        // 4. 解除 mmap 映射
         mmap_region_t *m = p->mmap;
         while (m) {
             vm_unmappages(p->pgtbl, m->begin, m->npages * PGSIZE, true);
@@ -147,10 +163,11 @@ void proc_free(proc_t *p)
         }
         p->mmap = NULL;
         
-        // 解除系统页映射
+        // 5. 解除系统页映射 (不释放物理内存)
         vm_unmappages(p->pgtbl, TRAMPOLINE, PGSIZE, false);
         vm_unmappages(p->pgtbl, TRAPFRAME, PGSIZE, false);
         
+        // 6. 释放页表本身
         pmem_free((uint64)p->pgtbl, true);
     }
     p->pgtbl = NULL;
@@ -162,51 +179,53 @@ void proc_free(proc_t *p)
     spinlock_release(&p->lk);
 }
 
-// 创建首个进程
+// 构建第一个用户进程 (proczero)
 void proc_make_first()
 {
     proc_t *p = proc_alloc();
-    init_proc = p;
+    init_process = p;
 
-    // 加载 initcode
-    void *mem = pmem_alloc(false);
-    memmove(mem, target_user_initcode, target_user_initcode_len);
-    vm_mappages(p->pgtbl, USER_BASE, (uint64)mem, PGSIZE, PTE_R|PTE_W|PTE_X|PTE_U);
+    // 拷贝 initcode 到用户空间
+    void *code_mem = pmem_alloc(false);
+    memmove(code_mem, target_user_initcode, target_user_initcode_len);
+    vm_mappages(p->pgtbl, USER_BASE, (uint64)code_mem, PGSIZE, PTE_R|PTE_W|PTE_X|PTE_U);
 
-    // 加载栈
-    void *stack = pmem_alloc(false);
-    vm_mappages(p->pgtbl, TRAPFRAME - PGSIZE, (uint64)stack, PGSIZE, PTE_R|PTE_W|PTE_U);
+    // 分配并映射用户栈 (1页)
+    void *stack_mem = pmem_alloc(false);
+    vm_mappages(p->pgtbl, TRAPFRAME - PGSIZE, (uint64)stack_mem, PGSIZE, PTE_R|PTE_W|PTE_U);
     p->ustack_npage = 1;
     p->heap_top = USER_BASE + PGSIZE;
 
-    // 设置 Trapframe
-    p->tf->user_to_kern_epc = USER_BASE;
-    p->tf->sp = TRAPFRAME;
+    // 配置 Trapframe 以便返回用户态
+    p->tf->user_to_kern_epc = USER_BASE;      // PC 指向代码段
+    p->tf->sp = TRAPFRAME;                    // SP 指向用户栈顶 (TRAPFRAME下方的虚拟地址)
     p->tf->user_to_kern_satp = r_satp();
-    p->tf->user_to_kern_sp = p->kstack + PGSIZE;
+    p->tf->user_to_kern_sp = p->kstack + PGSIZE; // 保存内核栈顶
     extern void trap_user_handler();
     p->tf->user_to_kern_trapvector = (uint64)trap_user_handler;
+    p->tf->user_to_kern_hartid = r_tp();
 
-    // 命名
-    char *s = "init";
+    // 设置名称
+    char *s = "proczero";
     for(int i=0; s[i]; i++) p->name[i] = s[i];
 
+    p->state = RUNNABLE;
     spinlock_release(&p->lk);
 }
 
-// 复制进程
+// 创建子进程 (Fork)
 int proc_fork()
 {
     proc_t *curr = myproc();
-    proc_t *child = proc_alloc();
+    proc_t *child = proc_alloc(); // 返回时持有 child->lk
     if (!child) return -1;
 
-    // 复制页表
+    // 1. 复制地址空间 (页表 + 物理页)
     uvm_copy_pgtbl(curr->pgtbl, child->pgtbl, curr->heap_top, curr->ustack_npage, curr->mmap);
     child->heap_top = curr->heap_top;
     child->ustack_npage = curr->ustack_npage;
 
-    // 复制 mmap 结构
+    // 2. 复制 mmap 管理结构
     mmap_region_t *src = curr->mmap;
     mmap_region_t **dst = &child->mmap;
     while (src) {
@@ -219,27 +238,46 @@ int proc_fork()
         src = src->next;
     }
 
-    // 复制 trapframe
+    // 3. 复制 Trapframe
     *(child->tf) = *(curr->tf);
-    child->tf->a0 = 0; // 子进程返回 0
+    child->tf->a0 = 0; // 子进程返回值为 0
     
-    // [CRITICAL] 修复栈指针：子进程必须使用自己的内核栈
+    // [重要] 修正子进程的内核栈指针，否则会踩踏父进程栈
     child->tf->user_to_kern_sp = child->kstack + PGSIZE;
 
-    // 复制父进程名称
+    // 4. 复制其他属性
     for(int i=0; i<16; i++) child->name[i] = curr->name[i];
     child->parent = curr;
     
     int pid = child->pid;
+    child->state = RUNNABLE;
     spinlock_release(&child->lk);
-    return pid;
+    
+    return pid; // 父进程返回子进程 PID
+}
+
+// 调度器辅助：切换到调度器上下文
+void proc_sched()
+{
+    swtch(&myproc()->ctx, &mycpu()->ctx);
+}
+
+// 进程主动让出 CPU (Yield)
+void proc_yield()
+{
+    proc_t *p = myproc();
+    spinlock_acquire(&p->lk);
+    p->state = RUNNABLE;
+    proc_sched();
+    spinlock_release(&p->lk);
 }
 
 // 唤醒机制
+// 唤醒所有在 chan 上等待的进程
 void proc_wakeup(void *chan)
 {
     for (int i = 0; i < N_PROC; i++) {
-        proc_t *p = &process_pool[i];
+        proc_t *p = &proc_pool[i];
         if (p != myproc()) {
             spinlock_acquire(&p->lk);
             if (p->state == SLEEPING && p->sleep_space == chan) {
@@ -250,59 +288,58 @@ void proc_wakeup(void *chan)
     }
 }
 
-// 休眠机制
+// 睡眠机制
+// 释放保护锁 lk，进程进入睡眠，唤醒后重新获取 lk
 void proc_sleep(void *chan, spinlock_t *lk)
 {
     proc_t *p = myproc();
     
-    // 必须先拿进程锁，再放外部锁，保证原子性
+    // 必须持有进程锁才能修改状态和切换
+    // 为了避免死锁，先获取进程锁，再释放传入的外部锁
     spinlock_acquire(&p->lk);
     spinlock_release(lk);
 
     p->sleep_space = chan;
     p->state = SLEEPING;
 
-    proc_sched(); // 切换
+    proc_sched(); // 切换 CPU
 
+    // 醒来后清理
     p->sleep_space = NULL;
     
     spinlock_release(&p->lk);
+    // 恢复外部锁
     spinlock_acquire(lk);
 }
-
-// 找到 src/kernel/proc/proc.c 中的 proc_scheduler 函数并替换为以下内容
 
 // 调度器主循环
 void proc_scheduler()
 {
-    cpu_t *my_cpu = mycpu();
-    
-    // 调度器本身不是进程，所以 proc 字段置空
-    my_cpu->proc = NULL;
+    cpu_t *c = mycpu();
+    c->proc = NULL;
 
     for (;;) {
-        // 必须开启中断，否则无法响应时钟中断导致无法抢占
+        // 开启中断，避免调度器空转时无法响应中断
         intr_on();
 
         for (int i = 0; i < N_PROC; i++) {
-            proc_t *p = &process_pool[i];
+            proc_t *p = &proc_pool[i];
             
             spinlock_acquire(&p->lk);
             
             if (p->state == RUNNABLE) {
-                // 切换状态：准备运行
                 p->state = RUNNING;
-                my_cpu->proc = p;
+                c->proc = p;
                 
-                // [关键修改] 添加调度日志，用于验证 Test-02
-                // 可以使用宏控制，这里直接打印以便通过测试
+                // [DEBUG] 仅在开启追踪时打印，避免 Test-1 刷屏
+                #if SCHED_TRACE
                 printf("proc %d is running...\n", p->pid);
+                #endif
                 
-                // 执行上下文切换：从调度器上下文 -> 进程上下文
-                swtch(&my_cpu->ctx, &p->ctx);
+                swtch(&c->ctx, &p->ctx);
                 
-                // 进程被挂起或退出后，swtch 返回到这里
-                my_cpu->proc = NULL;
+                // 进程切换回来，清理 CPU 引用
+                c->proc = NULL;
             }
             
             spinlock_release(&p->lk);
@@ -310,42 +347,27 @@ void proc_scheduler()
     }
 }
 
-// 切换回调度器
-void proc_sched()
-{
-    swtch(&myproc()->ctx, &mycpu()->ctx);
-}
-
-// 主动让出
-void proc_yield()
-{
-    proc_t *p = myproc();
-    spinlock_acquire(&p->lk);
-    p->state = RUNNABLE;
-    proc_sched();
-    spinlock_release(&p->lk);
-}
-
-// 退出
+// 进程退出
 void proc_exit(int code)
 {
     proc_t *curr = myproc();
-    if (curr == init_proc) panic("init exiting");
+    if (curr == init_process) panic("init process exiting");
 
-    // 获取全局树锁，开始处理父子关系
-    spinlock_acquire(&tree_lock);
+    // 获取生命周期锁，处理父子关系
+    spinlock_acquire(&lifecycle_lock);
 
-    // 过继子进程
+    // 1. 将所有子进程过继给 init_process
     for (int i = 0; i < N_PROC; i++) {
-        if (process_pool[i].parent == curr) {
-            process_pool[i].parent = init_proc;
-            // 如果孩子已经是僵尸，唤醒新父亲
-            spinlock_acquire(&process_pool[i].lk);
-            if (process_pool[i].state == ZOMBIE) {
-                 // 唤醒 init_proc (逻辑简化：只要唤醒 sleep_space==&tree_lock 的即可)
-                 proc_wakeup(&tree_lock); 
+        if (proc_pool[i].parent == curr) {
+            proc_pool[i].parent = init_process;
+            // 如果该子进程已经是僵尸，唤醒新父亲 (init_process)
+            spinlock_acquire(&proc_pool[i].lk);
+            if (proc_pool[i].state == ZOMBIE) {
+                 // init_process 应该在 lifecycle_lock 或自身指针上等待
+                 // 这里简化：唤醒在 lifecycle_lock 上等待的进程（包括 init）
+                 proc_wakeup(init_process); 
             }
-            spinlock_release(&process_pool[i].lk);
+            spinlock_release(&proc_pool[i].lk);
         }
     }
 
@@ -353,54 +375,63 @@ void proc_exit(int code)
     curr->exit_code = code;
     curr->state = ZOMBIE;
     
-    // 唤醒父进程
-    proc_wakeup(&tree_lock); // 父进程应该睡在 tree_lock 上
+    // 2. 唤醒父进程
+    // 父进程 wait 时是在父进程自身地址上等待的吗？
+    // 为了配合 proc_wait 的修改，这里唤醒 parent 即可
+    proc_wakeup(curr->parent); 
 
     spinlock_release(&curr->lk);
-    // 持有 tree_lock 进入调度会导致死锁吗？
-    // 调度器不使用 tree_lock。父进程 wait 会获取 tree_lock。
-    // 如果这里持有 tree_lock 切换，父进程醒来获取 tree_lock 就会死锁。
-    // 所以必须在切换前释放 tree_lock。
-    spinlock_release(&tree_lock);
+    // 调度前释放生命周期锁
+    spinlock_release(&lifecycle_lock);
 
+    // 带着进程锁进入调度器（调度器会释放它）
     spinlock_acquire(&curr->lk);
     proc_sched();
-    panic("zombie exit");
+    panic("zombie process revived");
 }
 
-// 等待子进程
+// 等待子进程退出
+// 返回子进程 PID，并拷贝退出码
 int proc_wait(uint64 addr)
 {
-    spinlock_acquire(&tree_lock);
+    spinlock_acquire(&lifecycle_lock);
 
     for (;;) {
         int have_kids = 0;
         proc_t *curr = myproc();
 
         for (int i = 0; i < N_PROC; i++) {
-            proc_t *p = &process_pool[i];
+            proc_t *p = &proc_pool[i];
             if (p->parent != curr) continue;
             
             have_kids = 1;
             spinlock_acquire(&p->lk);
             if (p->state == ZOMBIE) {
+                // 找到僵尸子进程，回收
                 int pid = p->pid;
                 int code = p->exit_code;
-                proc_free(p); // 内部释放 p->lk
-                spinlock_release(&tree_lock);
                 
-                if (addr) uvm_copyout(curr->pgtbl, addr, (uint64)&code, sizeof(int));
+                // 打印要求的唤醒日志 (Test-4)
+                printf("proc %d is wakeup!\n", curr->pid);
+
+                proc_free(p); // free 会释放 p->lk
+                spinlock_release(&lifecycle_lock);
+                
+                if (addr != 0) {
+                    uvm_copyout(curr->pgtbl, addr, (uint64)&code, sizeof(int));
+                }
                 return pid;
             }
             spinlock_release(&p->lk);
         }
 
         if (!have_kids) {
-            spinlock_release(&tree_lock);
+            spinlock_release(&lifecycle_lock);
             return -1;
         }
 
-        // 休眠在 tree_lock 上
-        proc_sleep(&tree_lock, &tree_lock);
+        // 有子进程但都在运行，睡眠等待
+        // 睡眠通道使用当前进程指针，避免全局冲突
+        proc_sleep(curr, &lifecycle_lock);
     }
 }

@@ -32,6 +32,7 @@ pte_t *vm_getpte(pgtbl_t table, uint64 virt_addr, bool alloc)
             *entry = PA_TO_PTE((uint64)new_table) | PTE_V;
         } 
         // 如果遇到了大页映射（叶子节点出现在中间层），这在当前设计中不应该发生
+        // PTE_CHECK 为 false 表示有权限位，即为叶子节点
         else if (!PTE_CHECK(*entry)) {
             return NULL;
         }
@@ -80,7 +81,7 @@ void vm_mappages(pgtbl_t table, uint64 virt_addr, uint64 phys_addr, uint64 len, 
         }
 
         // 检查是否处理完所有页面
-        if (curr_v == last_addr - (last_addr % PGSIZE)) // 这种判断方式处理了未对齐len的情况（虽然开头assert了）
+        if (curr_v == last_addr - (last_addr % PGSIZE))
             break;
         
         curr_v += PGSIZE;
@@ -103,7 +104,7 @@ void vm_unmappages(pgtbl_t table, uint64 virt_addr, uint64 len, bool do_free)
     uint64 curr = virt_addr;
     uint64 end = virt_addr + len; // 这里的end是开区间边界
 
-    // 向上取整处理len可能不对齐的情况（虽然assert限制了）
+    // 向上取整处理len可能不对齐的情况
     // 但逻辑上按照页遍历
     for (; curr < end; curr += PGSIZE) {
         pte_t *entry = vm_getpte(table, curr, false);
@@ -112,14 +113,15 @@ void vm_unmappages(pgtbl_t table, uint64 virt_addr, uint64 len, bool do_free)
         if (entry == NULL || !(*entry & PTE_V))
             continue;
         
-        // 检查是否是大页（中间层叶子节点），如果是则panic，目前不支持
-        if (!PTE_CHECK(*entry)) 
-            panic("vm_unmappages: huge page not supported");
+        // [修复] 删除了错误的 Huge Page 检查
+        // vm_getpte 返回的是 Level 0 的 PTE。
+        // 有效的 Level 0 PTE *必须* 带有权限位（即 PTE_CHECK(*entry) == false）。
+        // 之前的代码在这里 panic 是错误的。
 
         // 如果需要回收物理内存
         if (do_free) {
             uint64 pa = PTE_TO_PA(*entry);
-            if (pa) pmem_free(pa, false); // 假设释放的是用户页，in_kernel=false较为安全，或根据上下文
+            if (pa) pmem_free(pa, false); 
         }
         
         // 清空页表项
@@ -166,16 +168,8 @@ void kvm_init()
     extern char trampoline[];
     vm_mappages(kern_pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 
-    // 9. [Lab-6 新增] 映射所有进程的内核栈
-    // 这里的关键是：内核栈的物理页也是动态分配的
-    // 只要在内核页表中保留映射关系，进程切换时就不需要切换内核栈映射
+    // 9. 映射所有进程的内核栈
     for (int i = 0; i < N_PROC; i++) {
-        // 为第 i 个进程申请内核栈物理空间
-        // 我们这里分配 2 页大小（虽然实际上可能只用1页，多一页做guard page或者纯粹为了空间宽裕）
-        // 注意：物理内存分配需要连续调用两次 pmem_alloc 还是分配一块连续的？
-        // 通常 pmem_alloc 只分配一页。如果需要多页，得分别映射。
-        // 这里的实现方式是：分配 2 个物理页并连续映射到虚拟地址空间
-        
         // 页 1
         void *stack_p1 = pmem_alloc(false);
         if (!stack_p1) panic("kvm_init: alloc kstack page 1 failed");
