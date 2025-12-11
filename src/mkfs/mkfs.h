@@ -42,7 +42,7 @@ typedef struct inode_disk {
 
 // 文件系统常量定义
 #define BLOCK_SIZE       4096                 // 块的大小与页面大小保持一致
-#define N_DATA_BLOCK     (5 * 512 * 512)      // 数据区域设为 5GB
+#define N_DATA_BLOCK     (8*1024)      // 数据区域设为 5GB
 #define N_INODE          (1 << 16)            // 文件数量上限设为 65536个
 
 // 辅助计算

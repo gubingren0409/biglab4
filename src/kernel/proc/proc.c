@@ -10,7 +10,8 @@
 extern char trampoline[];
 extern void swtch(context_t *old, context_t *new);
 extern void trap_user_return();
-
+// 在 include 区域下方添加
+extern void fs_init();
 // --- 全局控制 ---
 
 // 调度器调试开关：置 1 开启调度日志，置 0 关闭（解决刷屏问题）
@@ -47,6 +48,13 @@ static void proc_entry_point()
 {
     // 释放调度器切换过来时持有的进程锁
     spinlock_release(&myproc()->lk);
+
+    // [NEW] 如果是第一个进程(PID=1)，负责初始化文件系统
+    // 必须在这里初始化，因为读取磁盘需要能够 sleep，这依赖于进程上下文
+    if (myproc()->pid == 1) {
+        fs_init();
+    }
+
     // 返回用户空间
     trap_user_return();
 }

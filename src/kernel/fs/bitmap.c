@@ -8,7 +8,24 @@ extern super_block_t sb;
 */ 
 static uint32 bitmap_search_and_set(uint32 bitmap_block_num, uint32 valid_count)
 {
+    buffer_t *buf = buffer_get(bitmap_block_num);
+    uint32 bit_found = -1;
 
+    for (uint32 i = 0; i < valid_count; i++) {
+        uint32 byte_idx = i / 8;
+        uint32 bit_idx = i % 8;
+        
+        if ((buf->data[byte_idx] & (1 << bit_idx)) == 0) {
+            // 找到空闲位
+            buf->data[byte_idx] |= (1 << bit_idx);
+            buffer_write(buf); // 写回磁盘
+            bit_found = i;
+            break;
+        }
+    }
+
+    buffer_put(buf);
+    return bit_found;
 }
 
 /* 
@@ -16,7 +33,13 @@ static uint32 bitmap_search_and_set(uint32 bitmap_block_num, uint32 valid_count)
 */
 static void bitmap_clear(uint32 bitmap_block_num, uint32 index)
 {
+    buffer_t *buf = buffer_get(bitmap_block_num);
+    uint32 byte_idx = index / 8;
+    uint32 bit_idx = index % 8;
 
+    buf->data[byte_idx] &= ~(1 << bit_idx);
+    buffer_write(buf);
+    buffer_put(buf);
 }
 
 /*
@@ -25,7 +48,21 @@ static void bitmap_clear(uint32 bitmap_block_num, uint32 index)
 */
 uint32 bitmap_alloc_block()
 {
-
+    uint32 first = sb.data_bitmap_firstblock;
+    uint32 count = sb.data_blocks;
+    uint32 bits_per_blk = BIT_PER_BLOCK;
+    
+    for (int i = 0; i < sb.data_bitmap_blocks; i++) {
+        uint32 search_len = (count > bits_per_blk) ? bits_per_blk : count;
+        uint32 idx = bitmap_search_and_set(first + i, search_len);
+        
+        if (idx != -1) {
+            // 返回全局 block 序号
+            return sb.data_firstblock + i * bits_per_blk + idx;
+        }
+        count -= search_len;
+    }
+    return -1;
 }
 
 /*
@@ -34,19 +71,38 @@ uint32 bitmap_alloc_block()
 */
 uint32 bitmap_alloc_inode()
 {
+    uint32 first = sb.inode_bitmap_firstblock;
+    uint32 count = sb.total_inodes;
+    uint32 bits_per_blk = BIT_PER_BLOCK;
 
+    for (int i = 0; i < sb.inode_bitmap_blocks; i++) {
+        uint32 search_len = (count > bits_per_blk) ? bits_per_blk : count;
+        uint32 idx = bitmap_search_and_set(first + i, search_len);
+        
+        if (idx != -1) {
+            // 返回 inode 序号 (0-based)
+            return i * bits_per_blk + idx;
+        }
+        count -= search_len;
+    }
+    return -1;
 }
 
 /* 释放一个block, 将data_bitmap对应bit设为0 */
 void bitmap_free_block(uint32 block_num)
 {
-
+    uint32 offset = block_num - sb.data_firstblock;
+    uint32 bitmap_blk = sb.data_bitmap_firstblock + (offset / BIT_PER_BLOCK);
+    uint32 idx = offset % BIT_PER_BLOCK;
+    bitmap_clear(bitmap_blk, idx);
 }
 
 /* 释放一个inode, 将inode_bitmap对应bit设为0 */
 void bitmap_free_inode(uint32 inode_num)
 {
-
+    uint32 bitmap_blk = sb.inode_bitmap_firstblock + (inode_num / BIT_PER_BLOCK);
+    uint32 idx = inode_num % BIT_PER_BLOCK;
+    bitmap_clear(bitmap_blk, idx);
 }
 
 /* 打印某个bitmap中所有分配出去的bit */

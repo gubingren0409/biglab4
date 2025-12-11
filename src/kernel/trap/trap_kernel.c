@@ -119,7 +119,10 @@ void external_interrupt_handler()
     if (irq_num == UART_IRQ) {
         // 处理串口输入
         uart_intr();
-    } else if (irq_num != 0) {
+    } else if (irq_num == VIRTIO_IRQ) {
+        // [NEW] 处理磁盘中断
+        virtio_disk_intr();
+    }else if (irq_num != 0) {
         printf("Ignored unexpected PLIC irq: %d\n", irq_num);
     }
 

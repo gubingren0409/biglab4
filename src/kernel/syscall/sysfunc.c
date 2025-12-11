@@ -163,3 +163,63 @@ uint64 sys_sleep()
     timer_wait(ticks);
     return 0;
 }
+// 放在 sysfunc.c 末尾
+
+uint64 sys_alloc_block() { return bitmap_alloc_block(); }
+uint64 sys_free_block() { 
+    uint32 bn; arg_uint32(0, &bn); 
+    bitmap_free_block(bn); 
+    return 0; 
+}
+uint64 sys_alloc_inode() { return bitmap_alloc_inode(); }
+uint64 sys_free_inode() { 
+    uint32 in; arg_uint32(0, &in); 
+    bitmap_free_inode(in); 
+    return 0; 
+}
+uint64 sys_show_bitmap() { 
+    uint32 type; arg_uint32(0, &type); 
+    bitmap_print(type); 
+    return 0; 
+}
+
+uint64 sys_get_block() {
+    uint32 bn; arg_uint32(0, &bn);
+    buffer_t *buf = buffer_get(bn);
+    return (uint64)buf; // 返回 buffer 指针给用户态作为句柄
+}
+
+uint64 sys_put_block() {
+    uint64 ptr; arg_uint64(0, &ptr);
+    buffer_put((buffer_t *)ptr);
+    return 0;
+}
+
+uint64 sys_read_block() {
+    uint64 buf_ptr; arg_uint64(0, &buf_ptr);
+    uint64 user_dst; arg_uint64(1, &user_dst);
+    buffer_t *buf = (buffer_t *)buf_ptr;
+    
+    uvm_copyout(myproc()->pgtbl, user_dst, (uint64)buf->data, BLOCK_SIZE);
+    return 0;
+}
+
+uint64 sys_write_block() {
+    uint64 buf_ptr; arg_uint64(0, &buf_ptr);
+    uint64 user_src; arg_uint64(1, &user_src);
+    buffer_t *buf = (buffer_t *)buf_ptr;
+    
+    uvm_copyin(myproc()->pgtbl, (uint64)buf->data, user_src, BLOCK_SIZE);
+    buffer_write(buf); // 写入磁盘
+    return 0;
+}
+
+uint64 sys_show_buffer() {
+    buffer_print_info();
+    return 0;
+}
+
+uint64 sys_flush_buffer() {
+    uint32 count; arg_uint32(0, &count);
+    return buffer_freemem(count);
+}

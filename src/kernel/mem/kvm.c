@@ -10,6 +10,8 @@ static pgtbl_t kern_pagetable;
  */
 pte_t *vm_getpte(pgtbl_t table, uint64 virt_addr, bool alloc)
 {
+    if (table == NULL) // [NEW] 处理pgtbl为NULL的情况
+        table = kern_pagetable;
     if (virt_addr >= VA_MAX)
         return NULL;
 
@@ -147,7 +149,7 @@ void kvm_init()
 
     // 4. 映射 PLIC 中断控制器 (读写)
     vm_mappages(kern_pagetable, PLIC_BASE, PLIC_BASE, 0x400000, PTE_R | PTE_W);
-
+    vm_mappages(kern_pagetable, VIRTIO_BASE, VIRTIO_BASE, PGSIZE, PTE_R | PTE_W);
     // 5. 映射内核代码段 (读执行 PTE_R | PTE_X)
     // 范围: KERNEL_BASE ~ KERNEL_DATA (不含)
     uint64 code_len = (uint64)KERNEL_DATA - KERNEL_BASE;
